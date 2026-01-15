@@ -40,6 +40,17 @@ export const api = {
         return res.json();
     },
 
+    async register(data: { name: string; phone: string; email: string; region: string }) {
+        if (!API_URL) throw new Error('API URL missing');
+        const res = await fetch(`${API_URL}/auth/signup`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data),
+        });
+        if (!res.ok) throw new Error('Registration failed');
+        return res.json();
+    },
+
     async submitOrder(orderData: any) {
         if (!API_URL) throw new Error('API URL missing');
         const res = await fetch(`${API_URL}/orders`, {

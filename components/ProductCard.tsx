@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect } from 'react';
 import { Product, Language } from '../types';
 import { calculatePrice, formatCurrency, getTierLabel, getNextTier, getExpiryStatus } from '../utils';
@@ -23,7 +22,10 @@ export const ProductCard: React.FC<ProductCardProps> = ({
   const [inputValue, setInputValue] = useState<string>(quantity.toString());
 
   // Image Fallback Logic
-  const localImage = `/assets/${product.norCode.toLowerCase()}.webp`;
+  // Sanitation: Remove spaces, lowercase. e.g. "NOR 100" -> "nor100.webp"
+  const sanitizedCode = product.norCode.toLowerCase().replace(/\s+/g, '');
+  const localImage = `/assets/${sanitizedCode}.webp`;
+
   const [imgSrc, setImgSrc] = useState(localImage);
   const [imgErrorCount, setImgErrorCount] = useState(0);
 
@@ -33,8 +35,6 @@ export const ProductCard: React.FC<ProductCardProps> = ({
       setImgSrc(product.imageUrl);
       setImgErrorCount(1);
     } else if (imgErrorCount <= 1) {
-      // Placeholder (Need a real medical placeholder, or generic div)
-      // For now, use a generic placeholder or data URI/Icon
       setImgSrc('');
       setImgErrorCount(2);
     }
@@ -77,7 +77,6 @@ export const ProductCard: React.FC<ProductCardProps> = ({
   const tierLabel = getTierLabel(parseInt(inputValue) || 0, language);
   const nextTier = getNextTier(parseInt(inputValue) || 0);
   const isOutOfStock = product.stockLevel === 'out';
-  const isLowStock = product.stockLevel === 'low';
 
   const expiryStatus = getExpiryStatus(product.expiryDate);
   const expiryColorClass =
@@ -91,7 +90,7 @@ export const ProductCard: React.FC<ProductCardProps> = ({
 
   // Render Image Helper
   const renderImage = () => {
-    if (imgSrc) {
+    if (imgSrc && imgErrorCount < 2) {
       return (
         <img
           src={imgSrc}
@@ -110,7 +109,6 @@ export const ProductCard: React.FC<ProductCardProps> = ({
   };
 
   if (viewMode === 'list') {
-    // List logic (simplified mainly image)
     return (
       <div className={`group bg-white rounded-xl border border-medical-border mb-3 overflow-hidden shadow-sm hover:shadow-soft transition-all duration-300 ${isOutOfStock ? 'opacity-80' : ''}`}>
         <div className="flex flex-col sm:flex-row p-4 gap-4 items-center">
@@ -122,7 +120,6 @@ export const ProductCard: React.FC<ProductCardProps> = ({
               </div>
             )}
           </div>
-          {/* Info & Action (Same as before but accessing props) */}
           <div className="flex-1 text-start min-w-0 w-full">
             <div className="flex items-center gap-2 mb-1.5 flex-wrap">
               <span className="text-[10px] font-bold tracking-wider text-medical-subtext bg-gray-100 px-1.5 py-0.5 rounded">{product.norCode}</span>
@@ -201,7 +198,7 @@ export const ProductCard: React.FC<ProductCardProps> = ({
           {isAr ? product.nameAr : product.nameEn}
         </h3>
 
-        <p className={`mb-4 line-clamp-3 h-[3.5em] leading-snug ${isAr ? 'text-sm font-arabic text-gray-600 font-medium' : 'text-xs text-medical-subtext'}`}>
+        <p className={`mb-4 line-clamp-3 h-[3.5em] leading-snug ${isAr ? 'text-sm font-arabic text-gray-600 font-medium' : 'text-xs text-medical-subtext'}`} dir={isAr ? 'rtl' : 'ltr'}>
           {isAr ? product.descriptionAr : product.descriptionEn}
         </p>
 

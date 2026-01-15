@@ -60,54 +60,142 @@ export default {
 				return new Response(JSON.stringify({ status: 'Refreshed' }), { headers: CORS_HEADERS });
 			}
 
+			// === POST /auth/signup ===
+			if (request.method === 'POST' && url.pathname === '/auth/signup') {
+				const body = await request.json() as any;
+				const { name, phone, email, region } = body;
+
+				if (!name || !phone || !region) {
+					return new Response(JSON.stringify({ error: 'Missing required fields' }), { status: 400, headers: CORS_HEADERS });
+				}
+
+				const customers = await fetchSheetData(env, 'Customers');
+
+				// Check for duplicates
+				const existingPhone = customers.find((row: any[]) => row[10] && row[10].toString().replace(/\D/g, '') === phone.replace(/\D/g, ''));
+				if (existingPhone) {
+					return new Response(JSON.stringify({ error: 'Phone number already registered' }), { status: 409, headers: CORS_HEADERS });
+				}
+
+				if (email) {
+					const existingEmail = customers.find((row: any[]) => row[7] && row[7].toString().toLowerCase() === email.toLowerCase());
+					if (existingEmail) {
+						return new Response(JSON.stringify({ error: 'Email already registered' }), { status: 409, headers: CORS_HEADERS });
+					}
+				}
+
+				// Generate ID
+				const newId = `PHAR-WEB-${Date.now().toString().slice(-4)}`; // Simple ID generation
+
+				// Columns: ID(0), Name(1), Region(2), Class(3), Limit(4), Points(5), Notes(6), Email(7), LTV(8), Balance(9), Phone(10)
+				const newRow = [
+					newId,
+					name,
+					region,
+					'C', // Default Class
+					'1000', // Default Limit
+					'0', // Points
+					'Web Signup', // Notes
+					email || '',
+					'0', // LTV
+					'0', // Balance
+					phone
+				];
+
+				// Append to Sheet
+				await appendSheetData(env, 'Customers', newRow);
+
+				return new Response(JSON.stringify({
+					status: 'ok',
+					customer: { id: newId, name, region, type: 'C', email, phone }
+				}), { headers: CORS_HEADERS });
+			}
+
 			// === POST /auth/login (Guardrail) ===
 			if (request.method === 'POST' && url.pathname === '/auth/login') {
 				const body = await request.json() as any;
 				const { email, name, phone } = body;
 
-				// Fetch Customers Sheet
 				const customers = await fetchSheetData(env, 'Customers');
-				// Headers: assumed [ID, Name, Phone, Email, ...]
-				// Find by Email
-				const existing = customers.find((row: any[]) => row[3] === email); // Adjust index based on sheet
+				// Columns: ID(0), Name(1), Region(2), Class(3), Limit(4), Points(5), Notes(6), Email(7), LTV(8), Balance(9), Phone(10)
+
+				// Find by Email (Index 7)
+				let existing = null;
+				if (email) {
+					existing = customers.find((row: any[]) => row[7] && row[7].toString().toLowerCase() === email.toLowerCase());
+				}
+
+				// Find by Phone (Index 10)
+				if (!existing && phone) {
+					existing = customers.find((row: any[]) => row[10] && row[10].toString().replace(/\D/g, '') === phone.replace(/\D/g, ''));
+				}
+
 				if (existing) {
 					return new Response(JSON.stringify({ status: 'ok', customer: formatCustomer(existing) }), { headers: CORS_HEADERS });
 				}
 
-				// Fuzzy Match
-				const conflict = customers.find((row: any[]) =>
-					(name && row[1] && row[1].toString().toLowerCase() === name.toLowerCase()) ||
-					(phone && row[2] && row[2].toString().replace(/\D/g, '') === phone.replace(/\D/g, ''))
-				);
+				// Conflict Detection (Phone exists but name/email mismatch? Or strictly check registration)
+				// User wants detailed errors.
+				// If we found NO existing user above, it means exact match failed.
+				// Let's check if Phone is registered at all (Index 10)
+				const phoneMatch = customers.find((row: any[]) => row[10] && row[10].toString().replace(/\D/g, '') === phone.replace(/\D/g, ''));
 
-				if (conflict) {
-					return new Response(JSON.stringify({
-						status: 'conflict',
-						possibleMatch: { name: conflict[1], region: conflict[4] || 'Unknown' } // Adjust index
-					}), { status: 409, headers: CORS_HEADERS });
+				if (phoneMatch) {
+					// Phone exists but didn't match the "existing" check? 
+					// Actually if it matched phone above, 'existing' would be set.
+					// So this block is unreachable unless I separate the logic.
+					// Let's re-logic: 
+					// The user wants to know "Phone registered but email mismatch" vs "Not registered".
 				}
 
-				return new Response(JSON.stringify({ status: 'new' }), { headers: CORS_HEADERS });
+				// RE-RE-LOGIC based on user flow:
+				// 1. Check strict existence
+				const byPhone = customers.find((row: any[]) => row[10] && row[10].toString().replace(/\D/g, '') === phone.replace(/\D/g, ''));
+				const byEmail = email ? customers.find((row: any[]) => row[7] && row[7].toString().toLowerCase() === email.toLowerCase()) : null;
+
+				if (byPhone) {
+					// Phone is found.
+					// If email was provided, does it match?
+					if (email && byPhone[7] && byPhone[7].toString().toLowerCase() !== email.toLowerCase()) {
+						return new Response(JSON.stringify({
+							error: 'Phone number is registered to a different email address.',
+							status: 'conflict'
+						}), { status: 403, headers: CORS_HEADERS });
+					}
+					// Success
+					return new Response(JSON.stringify({ status: 'ok', customer: formatCustomer(byPhone) }), { headers: CORS_HEADERS });
+				}
+
+				if (byEmail) {
+					// Email found but Phone didn't match (otherwise caught above)
+					if (phone && byEmail[10] && byEmail[10].toString().replace(/\D/g, '') !== phone.replace(/\D/g, '')) {
+						return new Response(JSON.stringify({
+							error: 'Email is registered to a different phone number.',
+							status: 'conflict'
+						}), { status: 403, headers: CORS_HEADERS });
+					}
+					return new Response(JSON.stringify({ status: 'ok', customer: formatCustomer(byEmail) }), { headers: CORS_HEADERS });
+				}
+
+				// Neither found -> Not Registered
+				return new Response(JSON.stringify({
+					error: 'Phone number not registered. Please sign up first.',
+					status: 'not_found'
+				}), { status: 403, headers: CORS_HEADERS });
 			}
 
 			// === POST /orders ===
 			if (request.method === 'POST' && url.pathname === '/orders') {
 				const body = await request.json();
-
-				// Proxy to Apps Script
 				const response = await fetch(env.APPS_SCRIPT_URL, {
 					method: 'POST',
 					body: JSON.stringify(body),
 					headers: { 'Content-Type': 'application/json' }
 				});
-
 				const result = await response.json() as any;
-
-				// Forward errors like 'out_of_stock'
 				if (result.result === 'error') {
 					return new Response(JSON.stringify(result), { status: 400, headers: CORS_HEADERS });
 				}
-
 				return new Response(JSON.stringify(result), { headers: CORS_HEADERS });
 			}
 
@@ -121,33 +209,30 @@ export default {
 
 async function updateCache(env: Env) {
 	const products = await fetchSheetData(env, "Noreva's products");
-	// Transform
-	// Columns: Category, Product Name, Product Code, Size, Description (Arabic), Price (LYD), Expiry Date, Inventory, Pick URL
-	// Index:   0         1             2             3     4                     5            6            7          8
-
-	// Skip header
+	// Columns Update:
+	// Brand(0), Name(1), Code(2), Size(3), DescAr(4), Price(5), Expiry(6), Inv(7), URL(8), FUNCTION(9)
 	const rows = products.slice(1);
 
 	const transformed = rows.map((row: any[]) => ({
-		id: row[2], // NOR Code as ID is generic? No user used ID '1' in local data.
-		// We'll use Product Code as ID or generate one. Using Product Code 'NOR 100' is better.
-		// Mapped to Frontend Type:
-		// id, norCode, nameEn, nameAr, descriptionAr, descriptionEn, size, price, expiryDate, category, brandLine, imageUrl, isNew, isSor, stockLevel
-
+		id: row[2],
 		norCode: row[2],
 		nameEn: row[1],
+		// If NameAr missing (it is in list?), use NameEn
 		nameAr: row[1],
 		descriptionAr: row[4],
-		descriptionEn: row[4], // duplicate for now if missing
+		descriptionEn: row[4],
 		size: row[3],
 		price: parseFloat(row[5] || '0'),
 		expiryDate: formatDate(row[6]),
-		category: mapCategory(row[0]),
-		imageUrl: row[8], // Pick URL
+
+		// Function column is index 9. Fallback to 'face'.
+		category: mapCategory(row[9]),
+
+		imageUrl: row[8],
 		stockLevel: mapStock(row[7]),
 
-		// Defaults/Missing
-		brandLine: 'Noreva',
+		// Brand is now column 0
+		brandLine: row[0] || 'Noreva',
 		isNew: false,
 		isSor: false
 	}));
