@@ -217,6 +217,8 @@ function App() {
       const orderData = {
         pharmacyId,
         customerNote: note,
+        totalAmount: cartTotal,
+        productCodes: cartList.map(item => `${item.product.norCode}(x${item.quantity})`).join(', '),
         items: cartList.map(item => ({
           id: item.product.id,
           code: item.product.norCode,
@@ -363,11 +365,11 @@ function App() {
               <div className="h-full w-px bg-gray-200 mx-2 hidden sm:block"></div>
 
               <div className="flex overflow-x-auto pb-2 sm:pb-0 gap-2 w-full no-scrollbar">
-                <button onClick={() => setActiveCategory('all')} className={`px-5 py-2.5 rounded-xl text-sm font-bold transition-all shadow-sm whitespace-nowrap ${activeCategory === 'all' ? 'bg-medical-primary text-white shadow-md ring-2 ring-medical-primary/20' : 'bg-white text-medical-subtext border border-gray-200 hover:border-gray-300 hover:text-gray-700'}`}>
+                <button onClick={() => setActiveCategory('all')} className={`px-5 py-2.5 rounded-xl text-sm font-bold transition-all whitespace-nowrap ${activeCategory === 'all' ? 'bg-medical-primary text-white shadow-lg' : 'bg-white text-medical-subtext border border-gray-200 hover:border-gray-300 hover:text-gray-700 shadow-sm'}`}>
                   {isAr ? 'الكل' : 'All Products'}
                 </button>
                 {CATEGORIES.map(cat => (
-                  <button key={cat.id} onClick={() => setActiveCategory(cat.id)} className={`px-5 py-2.5 rounded-xl text-sm font-bold transition-all shadow-sm whitespace-nowrap ${activeCategory === cat.id ? 'bg-medical-primary text-white shadow-md ring-2 ring-medical-primary/20' : 'bg-white text-medical-subtext border border-gray-200 hover:border-gray-300 hover:text-gray-700'}`}>
+                  <button key={cat.id} onClick={() => setActiveCategory(cat.id)} className={`px-5 py-2.5 rounded-xl text-sm font-bold transition-all whitespace-nowrap ${activeCategory === cat.id ? 'bg-medical-primary text-white shadow-lg' : 'bg-white text-medical-subtext border border-gray-200 hover:border-gray-300 hover:text-gray-700 shadow-sm'}`}>
                     {isAr ? cat.labelAr : cat.labelEn}
                   </button>
                 ))}

@@ -44,7 +44,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             <img
               src="/assets/medica_logo-removebg-preview.webp"
               alt="Medica Logo"
-              className="w-12 h-12 object-contain hover:scale-105 transition-transform dark:invert"
+              className="w-12 h-12 object-contain hover:scale-105 transition-transform"
             />
             <div className="hidden md:block">
               <h1 className="text-xl font-bold text-gray-900 leading-none tracking-tight">noreva</h1>
