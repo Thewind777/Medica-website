@@ -71,5 +71,12 @@ export const api = {
             method: 'POST',
             headers: { 'Authorization': `Bearer ${secret}` }
         });
+    },
+
+    async getHistory(pharmacyId: string) {
+        if (!API_URL) return { orders: [] };
+        const res = await fetch(`${API_URL}/auth/history?pharmacyId=${encodeURIComponent(pharmacyId)}`);
+        if (!res.ok) throw new Error('Failed to fetch history');
+        return res.json();
     }
 };

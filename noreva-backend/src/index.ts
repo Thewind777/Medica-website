@@ -170,7 +170,7 @@ export default {
 					return new Response(JSON.stringify({ error: 'Missing pharmacyId parameter' }), { status: 400, headers: CORS_HEADERS });
 				}
 
-				const orders = await fetchSheetData(env, 'Orders', 'A1:J1000');
+				const orders = await fetchSheetData(env, 'Orders', 'A1:K1000');
 				// Column C (index 2) is Pharmacy ID
 				const userOrders = orders.slice(1).filter((row: any[]) => row[2] === pharmacyId);
 
@@ -182,6 +182,7 @@ export default {
 					status: row[5],
 					paymentStatus: row[6],
 					deliveryDate: row[7],
+					paidAmount: row[10] || '0',
 					note: row[9]
 				}));
 

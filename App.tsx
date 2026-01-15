@@ -58,6 +58,8 @@ function App() {
   });
 
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
+  const [ordersHistory, setOrdersHistory] = useState<any[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
 
   // --- INITIAL DATA FETCH ---
   useEffect(() => {
@@ -86,6 +88,24 @@ function App() {
       }
     }
   }, []);
+
+  // Effect: Fetch History
+  useEffect(() => {
+    if (viewState === 'history' && isLoggedIn && pharmacyId) {
+      async function loadHistory() {
+        setHistoryLoading(true);
+        try {
+          const data = await api.getHistory(pharmacyId);
+          setOrdersHistory(data.orders || []);
+        } catch (e) {
+          console.error('History fetch error:', e);
+        } finally {
+          setHistoryLoading(false);
+        }
+      }
+      loadHistory();
+    }
+  }, [viewState, isLoggedIn, pharmacyId]);
 
   // --- AUTH HANDLERS ---
   const handleLoginSubmit = async (e: React.FormEvent) => {
@@ -449,20 +469,79 @@ function App() {
             <h2 className="text-2xl font-bold">{isAr ? 'سجل الطلبات' : 'Order History'}</h2>
           </div>
 
-          {/* Empty State for Demo */}
-          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-12 text-center">
-            <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
-              <HistoryIcon className="text-gray-400" size={32} />
+          {historyLoading ? (
+            <div className="flex justify-center py-20">
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-medical-primary"></div>
             </div>
-            <h3 className="text-lg font-bold text-gray-900">{isAr ? 'لا توجد طلبات سابقة' : 'No Previous Orders'}</h3>
-            <p className="text-gray-500 mt-2">{isAr ? 'ستظهر طلباتك هنا بمجرد إتمام أول عملية شراء.' : 'Your orders will appear here once you complete your first purchase.'}</p>
-            <button
-              onClick={() => setViewState('catalog')}
-              className="mt-6 px-6 py-2 bg-medical-primary text-white font-bold rounded-lg hover:bg-medical-secondary"
-            >
-              {isAr ? 'تصفح المنتجات' : 'Browse Products'}
-            </button>
-          </div>
+          ) : ordersHistory.length > 0 ? (
+            <div className="space-y-4">
+              {ordersHistory.map((order: any) => (
+                <div key={order.orderId} className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 hover:border-medical-primary/30 transition-all">
+                  <div className="flex flex-col sm:flex-row justify-between gap-4 mb-4">
+                    <div>
+                      <div className="text-xs font-mono text-medical-primary font-bold mb-1">{order.orderId}</div>
+                      <div className="text-sm text-gray-500">{new Date(order.timestamp).toLocaleString(language === 'ar' ? 'ar-LY' : 'en-GB')}</div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${order.status === 'DELIVERED' ? 'bg-emerald-100 text-emerald-700' :
+                          order.status === 'CANCELLED' ? 'bg-red-100 text-red-700' :
+                            'bg-amber-100 text-amber-700'
+                        }`}>
+                        {order.status}
+                      </span>
+                      <span className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${order.paymentStatus === 'PAID' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'
+                        }`}>
+                        {order.paymentStatus}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="border-t border-dashed border-gray-100 pt-4 mb-4">
+                    <div className="text-sm font-medium text-gray-900 line-clamp-2 mb-2">
+                      {order.productCodes}
+                    </div>
+                    {order.note && (
+                      <div className="text-xs text-medical-subtext bg-gray-50 p-2 rounded italic">
+                        "{order.note}"
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex flex-wrap items-center justify-between gap-4 pt-4 border-t border-gray-100">
+                    <div className="flex gap-4">
+                      <div className="text-sm font-bold">
+                        <span className="text-gray-400 text-[10px] uppercase block mb-0.5">{isAr ? 'الإجمالي' : 'TOTAL'}</span>
+                        {formatCurrency(parseFloat(order.totalAmount), language)}
+                      </div>
+                      <div className="text-sm font-bold text-emerald-600">
+                        <span className="text-gray-400 text-[10px] uppercase block mb-0.5">{isAr ? 'المدفوع' : 'PAID'}</span>
+                        {formatCurrency(parseFloat(order.paidAmount), language)}
+                      </div>
+                    </div>
+                    {order.deliveryDate && (
+                      <div className="text-xs font-medium text-gray-500 bg-gray-50 px-2 py-1 rounded">
+                        {isAr ? 'تاريخ التوصيل: ' : 'Delivery: '} {order.deliveryDate}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-12 text-center">
+              <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                <HistoryIcon className="text-gray-400" size={32} />
+              </div>
+              <h3 className="text-lg font-bold text-gray-900">{isAr ? 'لا توجد طلبات سابقة' : 'No Previous Orders'}</h3>
+              <p className="text-gray-500 mt-2">{isAr ? 'ستظهر طلباتك هنا بمجرد إتمام أول عملية شراء.' : 'Your orders will appear here once you complete your first purchase.'}</p>
+              <button
+                onClick={() => setViewState('catalog')}
+                className="mt-6 px-6 py-2 bg-medical-primary text-white font-bold rounded-lg hover:bg-medical-secondary"
+              >
+                {isAr ? 'تصفح المنتجات' : 'Browse Products'}
+              </button>
+            </div>
+          )}
         </div>
       )}
 
