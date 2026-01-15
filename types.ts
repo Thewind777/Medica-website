@@ -13,6 +13,8 @@ export interface Product {
   brandLine: string;
   imageUrl: string;
   size: string;
+  // New Field
+  status?: 'new' | 'sor' | 'normal'; // mapped from Col 11
   isNew: boolean;
   isSor: boolean; // Sale or Return
   stockLevel: 'high' | 'low' | 'out';

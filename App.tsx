@@ -8,7 +8,7 @@ import { ThemeSwitcher } from './components/ThemeSwitcher';
 import { CATEGORIES } from './data';
 import { api } from './api';
 import { Product, ViewState, Language, CartItem, FilterCriteria, CategoryId } from './types';
-import { XCircle, CheckCircle, Package, AlertTriangle, ArrowRight, User, ShoppingBag, X, Filter, History as HistoryIcon, Download, Phone, SlidersHorizontal, LayoutGrid, List } from 'lucide-react';
+import { XCircle, CheckCircle, Package, AlertTriangle, ArrowRight, User, ShoppingBag, X, Filter, History as HistoryIcon, Download, Phone, SlidersHorizontal, LayoutGrid, List, Search } from 'lucide-react';
 import { calculatePrice, performFuzzySearch, formatCurrency, getRemainingMonths } from './utils';
 import { Home, LogOut } from 'lucide-react';
 
@@ -125,6 +125,10 @@ function App() {
       }
 
       if (res.error) {
+        // Map explicit backend errors
+        if (res.error.toLowerCase().includes('registered')) setLoginError(language === 'ar' ? 'هذا الرقم غير مسجل، يرجى إنشاء حساب' : 'Phone not registered. Please Sign Up.');
+        else if (res.error.toLowerCase().includes('conflict') || res.error.toLowerCase().includes('match')) setLoginError(language === 'ar' ? 'بيانات غير متطابقة' : 'Data mismatch (Phone/Email).');
+        else setLoginError(res.error);
         throw new Error(res.error);
       }
 
@@ -144,7 +148,8 @@ function App() {
         // Stay there
       }
     } catch (err: any) {
-      setLoginError(err.message || (isAr ? 'فشل العملية' : 'Operation Failed'));
+      // Fallback error
+      if (!loginError) setLoginError(err.message || (isAr ? 'فشل العملية' : 'Login Failed'));
     } finally {
       if (!showConflictModal) setLoginLoading(false);
     }
@@ -164,7 +169,7 @@ function App() {
     if (isLoggedIn) {
       setViewState('history');
     } else {
-      setLoginError(isAr ? 'يرجى تسجيل الدخول لعرض السجل' : 'Please log in to view history');
+      setLoginError(isAr ? 'يرجى تسجيل الدخول لعرض السجل' : 'Please log in to view order history');
       setLoginModalOpen(true);
     }
   };
@@ -252,44 +257,59 @@ function App() {
   ].filter(Boolean).length;
 
   // --- FILTERING ---
-  const filteredProducts = useMemo(() => {
+  const recommendedProducts = useMemo(() => {
+    // Simple "Recommended" logic: New items or Best Sellers (mocked by Stock 'low')
+    return products.filter(p => p.isNew || p.stockLevel === 'low').slice(0, 8);
+  }, [products]);
+
+  const { filteredProducts, isRecommendation } = useMemo(() => {
     let result = products;
+    let isRec = false;
 
     if (activeCategory !== 'all') {
       result = result.filter(p => p.category === activeCategory);
     }
 
     if (searchTerm) {
-      result = performFuzzySearch(result, searchTerm);
+      const searchResults = performFuzzySearch(result, searchTerm);
+      if (searchResults.length === 0) {
+        // If 0 matches, show recommended
+        result = recommendedProducts;
+        isRec = true;
+      } else {
+        result = searchResults;
+      }
     }
 
-    // Apply advanced filters
-    if (filters.showSorOnly) result = result.filter(p => p.isSor);
-    if (filters.showNewOnly) result = result.filter(p => p.isNew);
-    if (filters.hideOutOfStock) result = result.filter(p => p.stockLevel !== 'out');
+    // Apply advanced filters ONLY if it's not a recommendation fallback
+    if (!isRec) {
+      if (filters.showSorOnly) result = result.filter(p => p.isSor);
+      if (filters.showNewOnly) result = result.filter(p => p.isNew);
+      if (filters.hideOutOfStock) result = result.filter(p => p.stockLevel !== 'out');
 
-    if (filters.minPrice) {
-      const min = parseFloat(filters.minPrice);
-      if (!isNaN(min)) result = result.filter(p => p.price >= min);
-    }
-    if (filters.maxPrice) {
-      const max = parseFloat(filters.maxPrice);
-      if (!isNaN(max)) result = result.filter(p => p.price <= max);
+      if (filters.minPrice) {
+        const min = parseFloat(filters.minPrice);
+        if (!isNaN(min)) result = result.filter(p => p.price >= min);
+      }
+      if (filters.maxPrice) {
+        const max = parseFloat(filters.maxPrice);
+        if (!isNaN(max)) result = result.filter(p => p.price <= max);
+      }
+
+      if (filters.minExpiryMonths > 0) {
+        result = result.filter(p => {
+          const rem = getRemainingMonths(p.expiryDate);
+          return rem >= filters.minExpiryMonths;
+        });
+      }
+
+      if (filters.selectedBrands.length > 0) {
+        result = result.filter(p => filters.selectedBrands.includes(p.brandLine));
+      }
     }
 
-    if (filters.minExpiryMonths > 0) {
-      result = result.filter(p => {
-        const rem = getRemainingMonths(p.expiryDate);
-        return rem >= filters.minExpiryMonths;
-      });
-    }
-
-    if (filters.selectedBrands.length > 0) {
-      result = result.filter(p => filters.selectedBrands.includes(p.brandLine));
-    }
-
-    return result;
-  }, [products, activeCategory, searchTerm, filters]);
+    return { filteredProducts: result, isRecommendation: isRec };
+  }, [products, activeCategory, searchTerm, filters, recommendedProducts]);
 
 
   if (loading) return <Loading />;
@@ -367,6 +387,19 @@ function App() {
             </div>
           </div>
 
+          {/* Search Fallback Warning */}
+          {isRecommendation && (
+            <div className="mb-6 bg-blue-50 border border-blue-100 p-4 rounded-xl flex items-center gap-3">
+              <div className="p-2 bg-blue-100 rounded-lg text-blue-600">
+                <Search size={20} />
+              </div>
+              <div>
+                <p className="text-sm font-bold text-gray-800">{isAr ? 'لم يتم العثور على نتائج مطابقة' : 'No exact matches found'}</p>
+                <p className="text-xs text-gray-500">{isAr ? `إليك بعض الاقتراحات لـ "${searchTerm}"` : `Showing recommended items instead for "${searchTerm}"`}</p>
+              </div>
+            </div>
+          )}
+
           <div className={viewMode === 'grid' ? "grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 sm:gap-6" : "flex flex-col gap-3"}>
             {filteredProducts.map(product => (
               <ProductCard
@@ -379,7 +412,7 @@ function App() {
               />
             ))}
           </div>
-          {filteredProducts.length === 0 && (
+          {filteredProducts.length === 0 && !isRecommendation && (
             <div className="col-span-full py-20 text-center text-gray-400 flex flex-col items-center justify-center">
               <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mb-4"><XCircle className="w-8 h-8 opacity-40" /></div>
               <h3 className="text-lg font-bold text-gray-900">{isAr ? 'لا توجد منتجات' : 'No products found'}</h3>
@@ -446,9 +479,6 @@ function App() {
               <button onClick={() => { setViewState('catalog'); setSuccessData(null); }} className="w-full py-3 bg-medical-primary text-white rounded-xl font-bold hover:bg-medical-secondary transition-colors">
                 {language === 'ar' ? 'عودة للتسوق' : 'Continue Shopping'}
               </button>
-              <button onClick={() => window.open('https://wa.me/218000000000', '_blank')} className="w-full py-3 bg-[#25D366] text-white rounded-xl font-bold hover:bg-[#128C7E] transition-colors flex items-center justify-center gap-2">
-                <Phone size={18} /> {language === 'ar' ? 'تواصل مع المبيعات' : 'Contact Sales'}
-              </button>
             </div>
           </div>
         </div>
@@ -473,7 +503,7 @@ function App() {
               {isRegisterMode && (
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">{language === 'ar' ? 'المدينة / المنطقة' : 'City / Region'}</label>
-                  <input type="text" required value={loginRegion} onChange={e => setLoginRegion(e.target.value)} className="w-full border rounded-lg p-3 focus:ring-2 focus:ring-medical-primary/50 outline-none" placeholder="Tripoli, Dahra..." />
+                  <input type="text" required value={loginRegion} onChange={e => setLoginRegion(e.target.value)} className="w-full border rounded-lg p-3 focus:ring-2 focus:ring-medical-primary/50 outline-none" placeholder="Tripoli..." />
                 </div>
               )}
 

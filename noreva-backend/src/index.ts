@@ -1,6 +1,4 @@
 
-
-
 export interface Env {
 	NOREVA_CACHE: KVNamespace;
 	GOOGLE_SERVICE_ACCOUNT_JSON: string;
@@ -29,11 +27,8 @@ export default {
 				// 1. Try Cache
 				const cached = await env.NOREVA_CACHE.get('products_data');
 				if (cached) {
-					// SWR: Check age? For now just return. Trigger background update if stale?
-					// User said "SWR... Return KV immediately if exists. Fetch Sheets in background if stale (>5min)"
-					// KV doesn't give timestamp easily unless stored in value.
-					// We'll store { timestamp, data }.
 					const parsed = JSON.parse(cached);
+					// SWR Logic: If stale (>5 min), trigger background update
 					const age = Date.now() - (parsed.timestamp || 0);
 					if (age > 5 * 60 * 1000) {
 						ctx.waitUntil(updateCache(env));
@@ -43,20 +38,24 @@ export default {
 					});
 				}
 
-				// 2. Fetch Fresh
+				// 2. Fetch Fresh (Blocking if no cache)
 				const freshData = await updateCache(env);
 				return new Response(JSON.stringify(freshData), {
 					headers: { 'Content-Type': 'application/json', ...CORS_HEADERS }
 				});
 			}
 
-			// === POST /update-cache ===
-			if (request.method === 'POST' && url.pathname === '/update-cache') {
+			// === POST / (Root Sync from Apps Script) or /update-cache ===
+			// INSTANT SYNC: Respond OK immediately, process in background
+			if (request.method === 'POST' && (url.pathname === '/update-cache' || url.pathname === '/')) {
 				const authHeader = request.headers.get('Authorization');
 				if (authHeader !== `Bearer ${env.SHARED_SECRET}`) {
 					return new Response('Unauthorized', { status: 401, headers: CORS_HEADERS });
 				}
-				await updateCache(env);
+
+				// Fire & Forget: Update cache in background
+				ctx.waitUntil(updateCache(env));
+
 				return new Response(JSON.stringify({ status: 'Refreshed' }), { headers: CORS_HEADERS });
 			}
 
@@ -134,40 +133,21 @@ export default {
 					return new Response(JSON.stringify({ status: 'ok', customer: formatCustomer(existing) }), { headers: CORS_HEADERS });
 				}
 
-				// Conflict Detection (Phone exists but name/email mismatch? Or strictly check registration)
-				// User wants detailed errors.
-				// If we found NO existing user above, it means exact match failed.
-				// Let's check if Phone is registered at all (Index 10)
-				const phoneMatch = customers.find((row: any[]) => row[10] && row[10].toString().replace(/\D/g, '') === phone.replace(/\D/g, ''));
-
-				if (phoneMatch) {
-					// Phone exists but didn't match the "existing" check? 
-					// Actually if it matched phone above, 'existing' would be set.
-					// So this block is unreachable unless I separate the logic.
-					// Let's re-logic: 
-					// The user wants to know "Phone registered but email mismatch" vs "Not registered".
-				}
-
-				// RE-RE-LOGIC based on user flow:
-				// 1. Check strict existence
+				// Conflict Detection
 				const byPhone = customers.find((row: any[]) => row[10] && row[10].toString().replace(/\D/g, '') === phone.replace(/\D/g, ''));
 				const byEmail = email ? customers.find((row: any[]) => row[7] && row[7].toString().toLowerCase() === email.toLowerCase()) : null;
 
 				if (byPhone) {
-					// Phone is found.
-					// If email was provided, does it match?
 					if (email && byPhone[7] && byPhone[7].toString().toLowerCase() !== email.toLowerCase()) {
 						return new Response(JSON.stringify({
 							error: 'Phone number is registered to a different email address.',
 							status: 'conflict'
 						}), { status: 403, headers: CORS_HEADERS });
 					}
-					// Success
 					return new Response(JSON.stringify({ status: 'ok', customer: formatCustomer(byPhone) }), { headers: CORS_HEADERS });
 				}
 
 				if (byEmail) {
-					// Email found but Phone didn't match (otherwise caught above)
 					if (phone && byEmail[10] && byEmail[10].toString().replace(/\D/g, '') !== phone.replace(/\D/g, '')) {
 						return new Response(JSON.stringify({
 							error: 'Email is registered to a different phone number.',
@@ -185,18 +165,33 @@ export default {
 			}
 
 			// === POST /orders ===
+			// INSTANT HANDSHAKE: Generate ID, Respond OK, Send to Sheet in Background
 			if (request.method === 'POST' && url.pathname === '/orders') {
-				const body = await request.json();
-				const response = await fetch(env.APPS_SCRIPT_URL, {
-					method: 'POST',
-					body: JSON.stringify(body),
-					headers: { 'Content-Type': 'application/json' }
-				});
-				const result = await response.json() as any;
-				if (result.result === 'error') {
-					return new Response(JSON.stringify(result), { status: 400, headers: CORS_HEADERS });
-				}
-				return new Response(JSON.stringify(result), { headers: CORS_HEADERS });
+				const body = await request.json() as any;
+
+				// 1. Generate ID here for speed
+				const orderId = `ORD-${Date.now()}-${Math.random().toString(36).substr(2, 4).toUpperCase()}`;
+
+				// 2. Respond to Frontend IMMEDIATELY
+				const instantResponse = new Response(JSON.stringify({ result: 'success', orderId }), { headers: CORS_HEADERS });
+
+				// 3. Process Sheet Append in Background
+				ctx.waitUntil((async () => {
+					try {
+						// Attach generated ID to body for Apps Script
+						body.orderId = orderId;
+
+						await fetch(env.APPS_SCRIPT_URL, {
+							method: 'POST',
+							body: JSON.stringify(body),
+							headers: { 'Content-Type': 'application/json' }
+						});
+					} catch (e) {
+						console.error("Background Order Sync Failed:", e);
+					}
+				})());
+
+				return instantResponse;
 			}
 
 			return new Response('Not Found', { status: 404, headers: CORS_HEADERS });
@@ -210,40 +205,81 @@ export default {
 async function updateCache(env: Env) {
 	const products = await fetchSheetData(env, "Noreva's products");
 	// Columns Update:
-	// Brand(0), Name(1), Code(2), Size(3), DescAr(4), Price(5), Expiry(6), Inv(7), URL(8), FUNCTION(9)
+	// Brand(0), Name(1), Code(2), Size(3), DescAr(4), Price(5), Expiry(6), Inv(7), URL(8), FUNCTION(9), STATUS(10)
 	const rows = products.slice(1);
 
-	const transformed = rows.map((row: any[]) => ({
-		id: row[2],
-		norCode: row[2],
-		nameEn: row[1],
-		// If NameAr missing (it is in list?), use NameEn
-		nameAr: row[1],
-		descriptionAr: row[4],
-		descriptionEn: row[4],
-		size: row[3],
-		price: parseFloat(row[5] || '0'),
-		expiryDate: formatDate(row[6]),
+	const transformed = rows.map((row: any[]) => {
+		const statusVal = (row[10] || '').toLowerCase();
 
-		// Function column is index 9. Fallback to 'face'.
-		category: mapCategory(row[9]),
+		return {
+			id: row[2],
+			norCode: row[2],
+			nameEn: row[1],
+			nameAr: row[1],
+			descriptionAr: row[4],
+			descriptionEn: row[4],
+			size: row[3],
+			price: parseFloat(row[5] || '0'),
+			expiryDate: formatDate(row[6]),
 
-		imageUrl: row[8],
-		stockLevel: mapStock(row[7]),
+			// Relaxed Category Mapping
+			category: mapCategory(row[9]),
 
-		// Brand is now column 0
-		brandLine: row[0] || 'Noreva',
-		isNew: false,
-		isSor: false
-	}));
+			imageUrl: row[8],
+			stockLevel: mapStock(row[7]),
+			brandLine: row[0] || 'Noreva',
+
+			// New Status Mapping
+			status: statusVal.includes('new') ? 'new' : (statusVal.includes('sor') ? 'sor' : 'normal'),
+			isNew: statusVal.includes('new'),
+			isSor: statusVal.includes('sor'),
+		};
+	});
 
 	const payload = { timestamp: Date.now(), data: transformed };
 	await env.NOREVA_CACHE.put('products_data', JSON.stringify(payload));
 	return transformed;
 }
 
+// --- HELPERS ---
 
-// --- AUTH UTILS ---
+function mapCategory(cat: string) {
+	if (!cat) return 'face';
+	const c = cat.toLowerCase().trim();
+	if (c.includes('face') || c.includes('visage')) return 'face';
+	if (c.includes('body') || c.includes('corps')) return 'body';
+	if (c.includes('sun') || c.includes('solaire') || c.includes('protection') || c.includes('spf')) return 'sun';
+	if (c.includes('hair') || c.includes('cheveux') || c.includes('capillaire')) return 'hair';
+	return 'face';
+}
+
+function mapStock(val: string) {
+	if (!val) return 'high';
+	const v = val.toLowerCase();
+	if (v.includes('out') || v === '0') return 'out';
+	if (v.includes('low')) return 'low';
+	return 'high';
+}
+
+function formatDate(val: string) {
+	if (!val) return '';
+	return val;
+}
+
+function formatCustomer(row: any[]) {
+	return {
+		id: row[0],
+		name: row[1],
+		region: row[2],
+		pharmacyClass: row[3],
+		limit: row[4],
+		points: row[5],
+		email: row[7],
+		balance: row[9],
+		phone: row[10]
+	};
+}
+
 async function fetchSheetData(env: Env, tabName: string) {
 	const token = await getGoogleAuthToken(env);
 	const url = `https://sheets.googleapis.com/v4/spreadsheets/${env.SHEET_ID}/values/${encodeURIComponent(tabName)}!A:Z`;
@@ -255,13 +291,35 @@ async function fetchSheetData(env: Env, tabName: string) {
 	return data.values || [];
 }
 
+async function appendSheetData(env: Env, sheetName: string, rowValues: string[]) {
+	const token = await getGoogleAuthToken(env);
+	const spreadsheetId = env.SHEET_ID;
+	const url = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(sheetName)}!A:A:append?valueInputOption=USER_ENTERED`;
+
+	const response = await fetch(url, {
+		method: 'POST',
+		headers: {
+			'Authorization': `Bearer ${token}`,
+			'Content-Type': 'application/json'
+		},
+		body: JSON.stringify({
+			values: [rowValues]
+		})
+	});
+
+	if (!response.ok) {
+		const txt = await response.text();
+		throw new Error('Failed to append sheet data: ' + txt);
+	}
+}
+
 async function getGoogleAuthToken(env: Env) {
 	const creds = JSON.parse(env.GOOGLE_SERVICE_ACCOUNT_JSON);
 	const header = { alg: 'RS256', typ: 'JWT' };
 	const now = Math.floor(Date.now() / 1000);
 	const claim = {
 		iss: creds.client_email,
-		scope: 'https://www.googleapis.com/auth/spreadsheets.readonly',
+		scope: 'https://www.googleapis.com/auth/spreadsheets',
 		aud: 'https://oauth2.googleapis.com/token',
 		exp: now + 3600,
 		iat: now,
@@ -269,7 +327,7 @@ async function getGoogleAuthToken(env: Env) {
 
 	const encodedHeader = btoaUrl(JSON.stringify(header));
 	const encodedClaim = btoaUrl(JSON.stringify(claim));
-	const input = `${encodedHeader}.${encodedClaim}`; // No encoder needed here
+	const input = `${encodedHeader}.${encodedClaim}`;
 
 	const key = await importPrivateKey(creds.private_key);
 	const signature = await crypto.subtle.sign(
@@ -278,7 +336,7 @@ async function getGoogleAuthToken(env: Env) {
 		new TextEncoder().encode(input)
 	);
 
-	const signedJwt = `${input}.${btoaUrl(signature)}`; // Pass signature Buffer directly
+	const signedJwt = `${input}.${btoaUrl(signature)}`;
 
 	const res = await fetch('https://oauth2.googleapis.com/token', {
 		method: 'POST',
@@ -296,7 +354,7 @@ async function importPrivateKey(pem: string) {
 	const binary = str2ab(atob(pem
 		.replace(/-----BEGIN PRIVATE KEY-----/, '')
 		.replace(/-----END PRIVATE KEY-----/, '')
-		.replace(/\s+/g, '') // Remove newlines
+		.replace(/\s+/g, '')
 	));
 
 	return crypto.subtle.importKey(
@@ -311,7 +369,7 @@ async function importPrivateKey(pem: string) {
 	);
 }
 
-// Helper: Base64Url Encode (accepts string or ArrayBuffer)
+// Helper: Base64Url Encode
 function btoaUrl(input: string | ArrayBuffer) {
 	let str = '';
 	if (typeof input === 'string') {
@@ -330,43 +388,4 @@ function str2ab(str: string) {
 		bufView[i] = str.charCodeAt(i);
 	}
 	return buf;
-}
-
-function mapCategory(cat: string) {
-	// Map sheet category to 'face', 'body', 'sun', 'hair'
-	if (!cat) return 'face';
-	const c = cat.toLowerCase();
-	if (c.includes('face') || c.includes('visage')) return 'face';
-	if (c.includes('body') || c.includes('corps')) return 'body';
-	if (c.includes('sun') || c.includes('solaire')) return 'sun';
-	if (c.includes('hair') || c.includes('cheveux')) return 'hair';
-	return 'face';
-}
-
-function mapStock(val: string) {
-	// Inventory: High, Low, Out?
-	if (!val) return 'high';
-	const v = val.toLowerCase();
-	if (v.includes('out') || v === '0') return 'out';
-	if (v.includes('low')) return 'low';
-	return 'high';
-}
-
-function formatDate(val: string) {
-	if (!val) return '';
-	// Handle Sheet Date? usually string or number?
-	// Google API returns formatted value (string) if valueRenderOption is FORMATTED_VALUE (default)
-	return val;
-}
-
-function formatCustomer(row: any[]) {
-	// row: [ID, Name, Phone, Email, Region, Class...]
-	return {
-		id: row[0],
-		name: row[1],
-		phone: row[2],
-		email: row[3],
-		region: row[4],
-		pharmacyClass: row[5]
-	};
 }
