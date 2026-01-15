@@ -1,6 +1,5 @@
 
-import { JWT } from 'google-auth-library';
-import { GoogleAuth } from 'google-auth-library';
+
 
 export interface Env {
 	NOREVA_CACHE: KVNamespace;
@@ -158,19 +157,94 @@ async function updateCache(env: Env) {
 	return transformed;
 }
 
+
+// --- AUTH UTILS ---
 async function fetchSheetData(env: Env, tabName: string) {
+	const token = await getGoogleAuthToken(env);
+	const url = `https://sheets.googleapis.com/v4/spreadsheets/${env.SHEET_ID}/values/${encodeURIComponent(tabName)}!A:Z`;
+	const res = await fetch(url, {
+		headers: { Authorization: `Bearer ${token}` }
+	});
+	const data = await res.json() as any;
+	if (data.error) throw new Error(JSON.stringify(data.error));
+	return data.values || [];
+}
+
+async function getGoogleAuthToken(env: Env) {
 	const creds = JSON.parse(env.GOOGLE_SERVICE_ACCOUNT_JSON);
-	const client = new JWT({
-		email: creds.client_email,
-		key: creds.private_key,
-		scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
+	const header = { alg: 'RS256', typ: 'JWT' };
+	const now = Math.floor(Date.now() / 1000);
+	const claim = {
+		iss: creds.client_email,
+		scope: 'https://www.googleapis.com/auth/spreadsheets.readonly',
+		aud: 'https://oauth2.googleapis.com/token',
+		exp: now + 3600,
+		iat: now,
+	};
+
+	const encodedHeader = btoaUrl(JSON.stringify(header));
+	const encodedClaim = btoaUrl(JSON.stringify(claim));
+	const input = `${encodedHeader}.${encodedClaim}`; // No encoder needed here
+
+	const key = await importPrivateKey(creds.private_key);
+	const signature = await crypto.subtle.sign(
+		{ name: 'RSASSA-PKCS1-v1_5' },
+		key,
+		new TextEncoder().encode(input)
+	);
+
+	const signedJwt = `${input}.${btoaUrl(signature)}`; // Pass signature Buffer directly
+
+	const res = await fetch('https://oauth2.googleapis.com/token', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+		body: `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${signedJwt}`
 	});
 
-	await client.authorize();
+	const tokenData = await res.json() as any;
+	if (!tokenData.access_token) throw new Error('Failed to get Google Token: ' + JSON.stringify(tokenData));
+	return tokenData.access_token;
+}
 
-	const url = `https://sheets.googleapis.com/v4/spreadsheets/${env.SHEET_ID}/values/${encodeURIComponent(tabName)}!A:Z`;
-	const res = await client.request({ url });
-	return (res.data as any).values || [];
+// Helper: PEM to CryptoKey
+async function importPrivateKey(pem: string) {
+	const binary = str2ab(atob(pem
+		.replace(/-----BEGIN PRIVATE KEY-----/, '')
+		.replace(/-----END PRIVATE KEY-----/, '')
+		.replace(/\s+/g, '') // Remove newlines
+	));
+
+	return crypto.subtle.importKey(
+		'pkcs8',
+		binary,
+		{
+			name: 'RSASSA-PKCS1-v1_5',
+			hash: 'SHA-256',
+		},
+		false,
+		['sign']
+	);
+}
+
+// Helper: Base64Url Encode (accepts string or ArrayBuffer)
+function btoaUrl(input: string | ArrayBuffer) {
+	let str = '';
+	if (typeof input === 'string') {
+		str = btoa(input);
+	} else {
+		str = btoa(String.fromCharCode(...new Uint8Array(input)));
+	}
+	return str.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+// Helper: String to ArrayBuffer
+function str2ab(str: string) {
+	const buf = new ArrayBuffer(str.length);
+	const bufView = new Uint8Array(buf);
+	for (let i = 0, strLen = str.length; i < strLen; i++) {
+		bufView[i] = str.charCodeAt(i);
+	}
+	return buf;
 }
 
 function mapCategory(cat: string) {
