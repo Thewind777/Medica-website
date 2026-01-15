@@ -96,7 +96,8 @@ export const ProductCard: React.FC<ProductCardProps> = ({
           src={imgSrc}
           alt={product.nameEn}
           onError={handleImageError}
-          className={`w-full h-full object-cover mix-blend-multiply opacity-90 group-hover:scale-105 transition-transform duration-500 ${isOutOfStock ? 'grayscale opacity-50' : ''}`}
+          className={`w-full h-full object-contain p-4 ${isOutOfStock ? 'grayscale opacity-50' : ''}`}
+          style={{ backgroundColor: 'white' }}
         />
       );
     }
@@ -112,7 +113,7 @@ export const ProductCard: React.FC<ProductCardProps> = ({
     return (
       <div className={`group bg-white rounded-xl border border-medical-border mb-3 overflow-hidden shadow-sm hover:shadow-soft transition-all duration-300 ${isOutOfStock ? 'opacity-80' : ''}`}>
         <div className="flex flex-col sm:flex-row p-4 gap-4 items-center">
-          <div className="relative w-20 h-20 flex-shrink-0 bg-white rounded-lg overflow-hidden border border-gray-100">
+          <div className="relative w-20 h-20 flex-shrink-0 bg-white rounded-lg overflow-hidden border border-gray-100 p-2">
             {renderImage()}
             {isOutOfStock && (
               <div className="absolute inset-0 flex items-center justify-center bg-gray-100/10">
@@ -179,7 +180,7 @@ export const ProductCard: React.FC<ProductCardProps> = ({
         )}
       </div>
 
-      <div className="relative aspect-[4/3] bg-gray-50 overflow-hidden">
+      <div className="relative aspect-square bg-white overflow-hidden p-6">
         {renderImage()}
         <div className="absolute bottom-2 end-2 bg-white/80 backdrop-blur text-[10px] font-mono text-gray-600 px-1.5 rounded">
           {product.size}

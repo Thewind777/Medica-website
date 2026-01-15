@@ -13,6 +13,11 @@ const CORS_HEADERS = {
 	'Access-Control-Allow-Headers': 'Content-Type, Authorization',
 };
 
+// Helper: Clean phone number
+function cleanPhone(phone: string): string {
+	return (phone || '').toString().replace(/\D/g, '');
+}
+
 export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 		if (request.method === 'OPTIONS') {
@@ -21,321 +26,270 @@ export default {
 
 		const url = new URL(request.url);
 
-		try {
-			// === GET /products ===
-			if (request.method === 'GET' && url.pathname === '/products') {
-				// 1. Try Cache
+		// === GET /products ===
+		if (request.method === 'GET' && url.pathname === '/products') {
+			try {
 				const cached = await env.NOREVA_CACHE.get('products_data');
 				if (cached) {
 					const parsed = JSON.parse(cached);
-					// SWR Logic: If stale (>5 min), trigger background update
 					const age = Date.now() - (parsed.timestamp || 0);
-					if (age > 5 * 60 * 1000) {
-						ctx.waitUntil(updateCache(env));
-					}
-					return new Response(JSON.stringify(parsed.data), {
-						headers: { 'Content-Type': 'application/json', ...CORS_HEADERS }
-					});
+					if (age > 60 * 1000) { ctx.waitUntil(updateCache(env)); }
+					return new Response(JSON.stringify(parsed.data), { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...CORS_HEADERS } });
 				}
-
-				// 2. Fetch Fresh (Blocking if no cache)
 				const freshData = await updateCache(env);
-				return new Response(JSON.stringify(freshData), {
-					headers: { 'Content-Type': 'application/json', ...CORS_HEADERS }
-				});
+				return new Response(JSON.stringify(freshData), { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...CORS_HEADERS } });
+			} catch (err: any) {
+				return new Response(JSON.stringify({ error: 'Failed to load products', reason: err.message }), { status: 500, headers: CORS_HEADERS });
 			}
+		}
 
-			// === POST / (Root Sync from Apps Script) or /update-cache ===
-			// INSTANT SYNC: Respond OK immediately, process in background
-			if (request.method === 'POST' && (url.pathname === '/update-cache' || url.pathname === '/')) {
-				const authHeader = request.headers.get('Authorization');
-				if (authHeader !== `Bearer ${env.SHARED_SECRET}`) {
-					return new Response('Unauthorized', { status: 401, headers: CORS_HEADERS });
-				}
-
-				// Fire & Forget: Update cache in background
-				ctx.waitUntil(updateCache(env));
-
-				return new Response(JSON.stringify({ status: 'Refreshed' }), { headers: CORS_HEADERS });
+		// === POST /update-cache (PURGE STRATEGY) ===
+		if (request.method === 'POST' && (url.pathname === '/update-cache' || url.pathname === '/')) {
+			const authHeader = request.headers.get('Authorization');
+			if (authHeader !== `Bearer ${env.SHARED_SECRET}`) {
+				return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401, headers: CORS_HEADERS });
 			}
+			try {
+				await env.NOREVA_CACHE.delete('products_data');
+				await updateCache(env);
+				return new Response(JSON.stringify({ status: 'Cache Purged & Refreshed' }), { headers: CORS_HEADERS });
+			} catch (err: any) {
+				return new Response(JSON.stringify({ error: 'Cache update failed', reason: err.message }), { status: 500, headers: CORS_HEADERS });
+			}
+		}
 
-			// === POST /auth/signup ===
-			if (request.method === 'POST' && url.pathname === '/auth/signup') {
+		// === POST /auth/signup ===
+		if (request.method === 'POST' && url.pathname === '/auth/signup') {
+			try {
 				const body = await request.json() as any;
 				const { name, phone, email, region } = body;
 
 				if (!name || !phone || !region) {
-					return new Response(JSON.stringify({ error: 'Missing required fields' }), { status: 400, headers: CORS_HEADERS });
+					return new Response(JSON.stringify({ error: 'Missing fields', reason: 'Name, Phone, and Region are required. Example: Janzour-Alola Pharmacy' }), { status: 400, headers: CORS_HEADERS });
 				}
 
-				const customers = await fetchSheetData(env, 'Customers');
+				// LIVE FETCH - wrapped in try/catch
+				let customers: any[];
+				try {
+					customers = await fetchSheetData(env, 'Customers', 'A1:K1000');
+				} catch (sheetErr: any) {
+					console.error('Sheet fetch error:', sheetErr);
+					return new Response(JSON.stringify({ error: 'Sheet Error', reason: sheetErr.message, debug: 'Signup fetch failed' }), { status: 503, headers: CORS_HEADERS });
+				}
 
-				// Check for duplicates
-				const existingPhone = customers.find((row: any[]) => row[10] && row[10].toString().replace(/\D/g, '') === phone.replace(/\D/g, ''));
+				const cleanedPhone = cleanPhone(phone);
+				const existingPhone = customers.find((row: any[]) => cleanPhone(row[10]) === cleanedPhone);
 				if (existingPhone) {
-					return new Response(JSON.stringify({ error: 'Phone number already registered' }), { status: 409, headers: CORS_HEADERS });
+					return new Response(JSON.stringify({ error: 'Duplicate', reason: 'Phone number already registered.' }), { status: 409, headers: CORS_HEADERS });
 				}
 
 				if (email) {
 					const existingEmail = customers.find((row: any[]) => row[7] && row[7].toString().toLowerCase() === email.toLowerCase());
 					if (existingEmail) {
-						return new Response(JSON.stringify({ error: 'Email already registered' }), { status: 409, headers: CORS_HEADERS });
+						return new Response(JSON.stringify({ error: 'Duplicate', reason: 'Email already registered.' }), { status: 409, headers: CORS_HEADERS });
 					}
 				}
 
-				// Generate ID
-				const newId = `PHAR-WEB-${Date.now().toString().slice(-4)}`; // Simple ID generation
+				const newId = `PHAR-WEB-${Date.now().toString().slice(-6)}`;
+				const newRow = [newId, name, region, 'C', '1000', '0', 'Web Signup', email || '', '0', '0', phone];
 
-				// Columns: ID(0), Name(1), Region(2), Class(3), Limit(4), Points(5), Notes(6), Email(7), LTV(8), Balance(9), Phone(10)
-				const newRow = [
-					newId,
-					name,
-					region,
-					'C', // Default Class
-					'1000', // Default Limit
-					'0', // Points
-					'Web Signup', // Notes
-					email || '',
-					'0', // LTV
-					'0', // Balance
-					phone
-				];
+				try {
+					await appendSheetData(env, 'Customers', 'A:K', newRow);
+				} catch (appendErr: any) {
+					console.error('Sheet append error:', appendErr);
+					return new Response(JSON.stringify({ error: 'Failed to save', reason: 'Google Sheets is busy. Please try again. Technical: ' + appendErr.message }), { status: 503, headers: CORS_HEADERS });
+				}
 
-				// Append to Sheet
-				await appendSheetData(env, 'Customers', newRow);
+				return new Response(JSON.stringify({ success: true, customer: { id: newId, name, region }, message: `Welcome ${name}!` }), { headers: CORS_HEADERS });
 
-				return new Response(JSON.stringify({
-					status: 'ok',
-					customer: { id: newId, name, region, type: 'C', email, phone }
-				}), { headers: CORS_HEADERS });
+			} catch (err: any) {
+				console.error('Signup crash:', err);
+				return new Response(JSON.stringify({ error: 'Signup failed', reason: err.message }), { status: 500, headers: CORS_HEADERS });
 			}
+		}
 
-			// === POST /auth/login (Guardrail) ===
-			if (request.method === 'POST' && url.pathname === '/auth/login') {
+		// === POST /auth/login ===
+		if (request.method === 'POST' && url.pathname === '/auth/login') {
+			try {
 				const body = await request.json() as any;
-				const { email, name, phone } = body;
+				const { email, phone } = body;
 
-				const customers = await fetchSheetData(env, 'Customers');
-				// Columns: ID(0), Name(1), Region(2), Class(3), Limit(4), Points(5), Notes(6), Email(7), LTV(8), Balance(9), Phone(10)
-
-				// Find by Email (Index 7)
-				let existing = null;
-				if (email) {
-					existing = customers.find((row: any[]) => row[7] && row[7].toString().toLowerCase() === email.toLowerCase());
+				let customers: any[];
+				try {
+					customers = await fetchSheetData(env, 'Customers', 'A1:K1000');
+				} catch (sheetErr: any) {
+					console.error('Sheet fetch error:', sheetErr);
+					return new Response(JSON.stringify({ error: 'Sheet Error', reason: sheetErr.message, debug: 'Login fetch failed' }), { status: 503, headers: CORS_HEADERS });
 				}
 
-				// Find by Phone (Index 10)
-				if (!existing && phone) {
-					existing = customers.find((row: any[]) => row[10] && row[10].toString().replace(/\D/g, '') === phone.replace(/\D/g, ''));
-				}
-
-				if (existing) {
-					return new Response(JSON.stringify({ status: 'ok', customer: formatCustomer(existing) }), { headers: CORS_HEADERS });
-				}
-
-				// Conflict Detection
-				const byPhone = customers.find((row: any[]) => row[10] && row[10].toString().replace(/\D/g, '') === phone.replace(/\D/g, ''));
-				const byEmail = email ? customers.find((row: any[]) => row[7] && row[7].toString().toLowerCase() === email.toLowerCase()) : null;
+				const cleanedPhone = cleanPhone(phone);
+				const byPhone = customers.find((row: any[]) => cleanPhone(row[10]) === cleanedPhone);
 
 				if (byPhone) {
 					if (email && byPhone[7] && byPhone[7].toString().toLowerCase() !== email.toLowerCase()) {
-						return new Response(JSON.stringify({
-							error: 'Phone number is registered to a different email address.',
-							status: 'conflict'
-						}), { status: 403, headers: CORS_HEADERS });
+						return new Response(JSON.stringify({ error: 'Conflict', reason: 'Phone is registered to a different email.' }), { status: 403, headers: CORS_HEADERS });
 					}
-					return new Response(JSON.stringify({ status: 'ok', customer: formatCustomer(byPhone) }), { headers: CORS_HEADERS });
+					return new Response(JSON.stringify({ status: 'ok', customer: formatCustomer(byPhone), message: `Welcome back ${byPhone[1]}!` }), { headers: CORS_HEADERS });
 				}
 
+				const byEmail = email ? customers.find((row: any[]) => row[7] && row[7].toString().toLowerCase() === email.toLowerCase()) : null;
 				if (byEmail) {
-					if (phone && byEmail[10] && byEmail[10].toString().replace(/\D/g, '') !== phone.replace(/\D/g, '')) {
-						return new Response(JSON.stringify({
-							error: 'Email is registered to a different phone number.',
-							status: 'conflict'
-						}), { status: 403, headers: CORS_HEADERS });
+					if (phone && cleanPhone(byEmail[10]) !== cleanedPhone) {
+						return new Response(JSON.stringify({ error: 'Conflict', reason: 'Email is registered to a different phone.' }), { status: 403, headers: CORS_HEADERS });
 					}
-					return new Response(JSON.stringify({ status: 'ok', customer: formatCustomer(byEmail) }), { headers: CORS_HEADERS });
+					return new Response(JSON.stringify({ status: 'ok', customer: formatCustomer(byEmail), message: `Welcome back ${byEmail[1]}!` }), { headers: CORS_HEADERS });
 				}
 
-				// Neither found -> Not Registered
-				return new Response(JSON.stringify({
-					error: 'Phone number not registered. Please sign up first.',
-					status: 'not_found'
-				}), { status: 403, headers: CORS_HEADERS });
+				return new Response(JSON.stringify({ error: 'Not Found', reason: 'Phone number not found. Please sign up first.' }), { status: 404, headers: CORS_HEADERS });
+
+			} catch (err: any) {
+				console.error('Login crash:', err);
+				return new Response(JSON.stringify({ error: 'Login failed', reason: err.message }), { status: 500, headers: CORS_HEADERS });
 			}
-
-			// === POST /orders ===
-			// INSTANT HANDSHAKE: Generate ID, Respond OK, Send to Sheet in Background
-			if (request.method === 'POST' && url.pathname === '/orders') {
-				const body = await request.json() as any;
-
-				// 1. Generate ID here for speed
-				const orderId = `ORD-${Date.now()}-${Math.random().toString(36).substr(2, 4).toUpperCase()}`;
-
-				// 2. Respond to Frontend IMMEDIATELY
-				const instantResponse = new Response(JSON.stringify({ result: 'success', orderId }), { headers: CORS_HEADERS });
-
-				// 3. Process Sheet Append in Background
-				ctx.waitUntil((async () => {
-					try {
-						// Attach generated ID to body for Apps Script
-						body.orderId = orderId;
-
-						await fetch(env.APPS_SCRIPT_URL, {
-							method: 'POST',
-							body: JSON.stringify(body),
-							headers: { 'Content-Type': 'application/json' }
-						});
-					} catch (e) {
-						console.error("Background Order Sync Failed:", e);
-					}
-				})());
-
-				return instantResponse;
-			}
-
-			return new Response('Not Found', { status: 404, headers: CORS_HEADERS });
-
-		} catch (err: any) {
-			return new Response(JSON.stringify({ error: err.message }), { status: 500, headers: CORS_HEADERS });
 		}
+
+		// === POST /orders ===
+		if (request.method === 'POST' && url.pathname === '/orders') {
+			try {
+				const body = await request.json() as any;
+				const orderId = `ORD-${Date.now()}-${Math.random().toString(36).substr(2, 4).toUpperCase()}`;
+				ctx.waitUntil((async () => {
+					try { body.orderId = orderId; await fetch(env.APPS_SCRIPT_URL, { method: 'POST', body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' } }); } catch (e) { console.error(e); }
+				})());
+				return new Response(JSON.stringify({ result: 'success', orderId }), { headers: CORS_HEADERS });
+			} catch (err: any) {
+				return new Response(JSON.stringify({ error: 'Order failed', reason: err.message }), { status: 500, headers: CORS_HEADERS });
+			}
+		}
+
+		// === GET /auth/history (Filter Orders by Pharmacy ID in Column C) ===
+		if (request.method === 'GET' && url.pathname === '/auth/history') {
+			try {
+				const pharmacyId = url.searchParams.get('pharmacyId');
+				if (!pharmacyId) {
+					return new Response(JSON.stringify({ error: 'Missing pharmacyId parameter' }), { status: 400, headers: CORS_HEADERS });
+				}
+
+				const orders = await fetchSheetData(env, 'Orders', 'A1:J1000');
+				// Column C (index 2) is Pharmacy ID
+				const userOrders = orders.slice(1).filter((row: any[]) => row[2] === pharmacyId);
+
+				const formattedOrders = userOrders.map((row: any[]) => ({
+					orderId: row[0],
+					timestamp: row[1],
+					productCodes: row[3],
+					totalAmount: row[4],
+					status: row[5],
+					paymentStatus: row[6],
+					deliveryDate: row[7],
+					note: row[9]
+				}));
+
+				return new Response(JSON.stringify({ orders: formattedOrders }), { headers: CORS_HEADERS });
+			} catch (err: any) {
+				return new Response(JSON.stringify({ error: 'History fetch failed', reason: err.message }), { status: 500, headers: CORS_HEADERS });
+			}
+		}
+
+		return new Response(JSON.stringify({ error: 'Not Found' }), { status: 404, headers: CORS_HEADERS });
 	},
 };
 
+// === CACHE UPDATE ===
 async function updateCache(env: Env) {
-	const products = await fetchSheetData(env, "Noreva's products");
-	// Columns Update:
-	// Brand(0), Name(1), Code(2), Size(3), DescAr(4), Price(5), Expiry(6), Inv(7), URL(8), FUNCTION(9), STATUS(10)
+	const products = await fetchSheetData(env, "Noreva's Products", 'A1:K1000');
 	const rows = products.slice(1);
-
 	const transformed = rows.map((row: any[]) => {
 		const statusVal = (row[10] || '').toLowerCase();
-
 		return {
-			id: row[2],
-			norCode: row[2],
-			nameEn: row[1],
-			nameAr: row[1],
-			descriptionAr: row[4],
-			descriptionEn: row[4],
-			size: row[3],
-			price: parseFloat(row[5] || '0'),
-			expiryDate: formatDate(row[6]),
-
-			// Relaxed Category Mapping
-			category: mapCategory(row[9]),
-
-			imageUrl: row[8],
-			stockLevel: mapStock(row[7]),
+			id: row[2], norCode: row[2], nameEn: row[1], nameAr: row[1],
+			descriptionAr: row[4], descriptionEn: row[4], size: row[3],
+			price: parseFloat(row[5] || '0'), expiryDate: row[6] || '',
+			category: mapCategory(row[9]), imageUrl: row[8], stockLevel: mapStock(row[7]),
 			brandLine: row[0] || 'Noreva',
-
-			// New Status Mapping
 			status: statusVal.includes('new') ? 'new' : (statusVal.includes('sor') ? 'sor' : 'normal'),
-			isNew: statusVal.includes('new'),
-			isSor: statusVal.includes('sor'),
+			isNew: statusVal.includes('new'), isSor: statusVal.includes('sor'),
 		};
 	});
-
-	const payload = { timestamp: Date.now(), data: transformed };
-	await env.NOREVA_CACHE.put('products_data', JSON.stringify(payload));
+	await env.NOREVA_CACHE.put('products_data', JSON.stringify({ timestamp: Date.now(), data: transformed }));
 	return transformed;
 }
 
-// --- HELPERS ---
+// === HELPERS ===
+function mapCategory(cat: string) { if (!cat) return 'face'; const c = cat.toLowerCase(); if (c.includes('body')) return 'body'; if (c.includes('sun') || c.includes('spf')) return 'sun'; if (c.includes('hair')) return 'hair'; return 'face'; }
+function mapStock(val: string) { if (!val) return 'high'; const v = val.toLowerCase(); if (v.includes('out') || v === '0') return 'out'; if (v.includes('low')) return 'low'; return 'high'; }
+function formatCustomer(row: any[]) { return { id: row[0], name: row[1], region: row[2], pharmacyClass: row[3], email: row[7], phone: row[10] }; }
 
-function mapCategory(cat: string) {
-	if (!cat) return 'face';
-	const c = cat.toLowerCase().trim();
-	if (c.includes('face') || c.includes('visage')) return 'face';
-	if (c.includes('body') || c.includes('corps')) return 'body';
-	if (c.includes('sun') || c.includes('solaire') || c.includes('protection') || c.includes('spf')) return 'sun';
-	if (c.includes('hair') || c.includes('cheveux') || c.includes('capillaire')) return 'hair';
-	return 'face';
-}
+// === GOOGLE SHEETS API (Heavily Optimized) ===
+let cachedToken: { token: string; expires: number } | null = null;
+let cachedCryptoKey: any = null;
+let cachedClientEmail: string | null = null;
 
-function mapStock(val: string) {
-	if (!val) return 'high';
-	const v = val.toLowerCase();
-	if (v.includes('out') || v === '0') return 'out';
-	if (v.includes('low')) return 'low';
-	return 'high';
-}
-
-function formatDate(val: string) {
-	if (!val) return '';
-	return val;
-}
-
-function formatCustomer(row: any[]) {
-	return {
-		id: row[0],
-		name: row[1],
-		region: row[2],
-		pharmacyClass: row[3],
-		limit: row[4],
-		points: row[5],
-		email: row[7],
-		balance: row[9],
-		phone: row[10]
-	};
-}
-
-async function fetchSheetData(env: Env, tabName: string) {
+async function fetchSheetData(env: Env, tabName: string, range: string): Promise<any[]> {
 	const token = await getGoogleAuthToken(env);
-	const url = `https://sheets.googleapis.com/v4/spreadsheets/${env.SHEET_ID}/values/${encodeURIComponent(tabName)}!A:Z`;
-	const res = await fetch(url, {
-		headers: { Authorization: `Bearer ${token}` }
+	// Use specific range like A1:K1000 instead of A:Z to avoid exceeding column count
+	const fullRange = `${tabName}!${range}`;
+	const apiUrl = `https://sheets.googleapis.com/v4/spreadsheets/${env.SHEET_ID}/values/${encodeURIComponent(fullRange)}`;
+
+	const res = await fetch(apiUrl, {
+		headers: { Authorization: `Bearer ${token}` },
+		cf: { cacheTtl: 0 }
 	});
+
+	if (!res.ok) {
+		const errText = await res.text();
+		throw new Error(`Sheet API ${res.status} for ${fullRange}: ${errText}`);
+	}
+
 	const data = await res.json() as any;
-	if (data.error) throw new Error(JSON.stringify(data.error));
+	if (data.error) throw new Error(`Range ${fullRange}: ${JSON.stringify(data.error)}`);
 	return data.values || [];
 }
 
-async function appendSheetData(env: Env, sheetName: string, rowValues: string[]) {
+async function appendSheetData(env: Env, sheetName: string, range: string, rowValues: string[]): Promise<void> {
 	const token = await getGoogleAuthToken(env);
-	const spreadsheetId = env.SHEET_ID;
-	const url = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(sheetName)}!A:A:append?valueInputOption=USER_ENTERED`;
+	const apiUrl = `https://sheets.googleapis.com/v4/spreadsheets/${env.SHEET_ID}/values/${encodeURIComponent(sheetName)}!${range}:append?valueInputOption=USER_ENTERED`;
 
-	const response = await fetch(url, {
+	const res = await fetch(apiUrl, {
 		method: 'POST',
-		headers: {
-			'Authorization': `Bearer ${token}`,
-			'Content-Type': 'application/json'
-		},
-		body: JSON.stringify({
-			values: [rowValues]
-		})
+		headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+		body: JSON.stringify({ values: [rowValues] })
 	});
 
-	if (!response.ok) {
-		const txt = await response.text();
-		throw new Error('Failed to append sheet data: ' + txt);
+	if (!res.ok) {
+		const errText = await res.text();
+		throw new Error(`Append API ${res.status}: ${errText}`);
 	}
 }
 
-async function getGoogleAuthToken(env: Env) {
-	const creds = JSON.parse(env.GOOGLE_SERVICE_ACCOUNT_JSON);
-	const header = { alg: 'RS256', typ: 'JWT' };
+async function getGoogleAuthToken(env: Env): Promise<string> {
+	// Use cached token if still valid
+	if (cachedToken && Date.now() < cachedToken.expires) {
+		return cachedToken.token;
+	}
+
+	// Parse creds and import key ONCE (cache at module level)
+	if (!cachedCryptoKey || !cachedClientEmail) {
+		const creds = JSON.parse(env.GOOGLE_SERVICE_ACCOUNT_JSON);
+		cachedClientEmail = creds.client_email;
+		cachedCryptoKey = await importPrivateKey(creds.private_key);
+	}
+
 	const now = Math.floor(Date.now() / 1000);
+	const header = { alg: 'RS256', typ: 'JWT' };
 	const claim = {
-		iss: creds.client_email,
+		iss: cachedClientEmail,
 		scope: 'https://www.googleapis.com/auth/spreadsheets',
 		aud: 'https://oauth2.googleapis.com/token',
 		exp: now + 3600,
-		iat: now,
+		iat: now
 	};
 
 	const encodedHeader = btoaUrl(JSON.stringify(header));
 	const encodedClaim = btoaUrl(JSON.stringify(claim));
 	const input = `${encodedHeader}.${encodedClaim}`;
 
-	const key = await importPrivateKey(creds.private_key);
-	const signature = await crypto.subtle.sign(
-		{ name: 'RSASSA-PKCS1-v1_5' },
-		key,
-		new TextEncoder().encode(input)
-	);
-
+	const signature = await crypto.subtle.sign({ name: 'RSASSA-PKCS1-v1_5' }, cachedCryptoKey, new TextEncoder().encode(input));
 	const signedJwt = `${input}.${btoaUrl(signature)}`;
 
 	const res = await fetch('https://oauth2.googleapis.com/token', {
@@ -344,48 +298,49 @@ async function getGoogleAuthToken(env: Env) {
 		body: `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${signedJwt}`
 	});
 
+	if (!res.ok) {
+		const errText = await res.text();
+		throw new Error(`Google Auth ${res.status}: ${errText}`);
+	}
+
 	const tokenData = await res.json() as any;
-	if (!tokenData.access_token) throw new Error('Failed to get Google Token: ' + JSON.stringify(tokenData));
+	if (!tokenData.access_token) throw new Error('No access_token in response');
+
+	// Cache token for 55 minutes
+	cachedToken = { token: tokenData.access_token, expires: Date.now() + 55 * 60 * 1000 };
 	return tokenData.access_token;
 }
 
-// Helper: PEM to CryptoKey
-async function importPrivateKey(pem: string) {
-	const binary = str2ab(atob(pem
-		.replace(/-----BEGIN PRIVATE KEY-----/, '')
-		.replace(/-----END PRIVATE KEY-----/, '')
-		.replace(/\s+/g, '')
-	));
+async function importPrivateKey(pem: string): Promise<any> {
+	// Handle both literal \n and actual newlines in the PEM string
+	const pemHeader = '-----BEGIN PRIVATE KEY-----';
+	const pemFooter = '-----END PRIVATE KEY-----';
+	const pemContents = pem
+		.replace(pemHeader, '')
+		.replace(pemFooter, '')
+		.replace(/\\n/g, '')  // Remove literal backslash-n from JSON
+		.replace(/\n/g, '')   // Remove actual newlines
+		.replace(/\r/g, '')   // Remove carriage returns
+		.replace(/\s/g, '')   // Remove any remaining whitespace
+		.trim();
+
+	const binaryDer = Uint8Array.from(atob(pemContents), c => c.charCodeAt(0));
 
 	return crypto.subtle.importKey(
 		'pkcs8',
-		binary,
-		{
-			name: 'RSASSA-PKCS1-v1_5',
-			hash: 'SHA-256',
-		},
+		binaryDer,
+		{ name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
 		false,
 		['sign']
 	);
 }
 
-// Helper: Base64Url Encode
-function btoaUrl(input: string | ArrayBuffer) {
-	let str = '';
+function btoaUrl(input: string | ArrayBuffer): string {
+	let str: string;
 	if (typeof input === 'string') {
 		str = btoa(input);
 	} else {
 		str = btoa(String.fromCharCode(...new Uint8Array(input)));
 	}
 	return str.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
-// Helper: String to ArrayBuffer
-function str2ab(str: string) {
-	const buf = new ArrayBuffer(str.length);
-	const bufView = new Uint8Array(buf);
-	for (let i = 0, strLen = str.length; i < strLen; i++) {
-		bufView[i] = str.charCodeAt(i);
-	}
-	return buf;
 }
